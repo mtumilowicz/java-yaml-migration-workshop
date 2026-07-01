@@ -60,6 +60,7 @@ service:
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jackson.version>2.17.2</jackson.version>
+        <mustache.version>0.9.14</mustache.version>
         <junit.version>5.10.3</junit.version>
     </properties>
 
@@ -68,6 +69,11 @@ service:
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-yaml</artifactId>
             <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.spullara.mustache.java</groupId>
+            <artifactId>compiler</artifactId>
+            <version>${mustache.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -94,6 +100,24 @@ service:
 </project>
 ```
 
+## YAML Template
+
+`src/main/resources/service.yaml.mustache`
+
+```yaml
+service:
+  name: {{name}}
+  team: {{team}}
+  runtime:
+    port: {{port}}
+  persistence:
+    dbHost: {{dbHost}}
+    dbName: {{dbName}}
+  limits:
+    cpu: {{cpu}}
+    memory: {{memory}}
+```
+
 ## Full Java Code
 
 `src/main/java/YamlMigration.java`
@@ -101,25 +125,31 @@ service:
 ```java
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
+import com.github.mustachejava.DefaultMustacheFactory;
+import com.github.mustachejava.Mustache;
+import com.github.mustachejava.MustacheFactory;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 public class YamlMigration {
     private static final String INPUT_FILE_NAME = "app.yaml";
     private static final String OUTPUT_FILE_NAME = "service.yaml";
+    private static final String TEMPLATE_FILE_NAME = "service.yaml.mustache";
 
-    private static final YAMLFactory YAML_FACTORY = YAMLFactory.builder()
-            .disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER)
-            .enable(YAMLGenerator.Feature.MINIMIZE_QUOTES)
-            .build();
-    private static final ObjectMapper YAML_MAPPER = new ObjectMapper(YAML_FACTORY);
+    private static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
+    private static final MustacheFactory MUSTACHE_FACTORY = new DefaultMustacheFactory();
 
     public static void main(String[] args) throws IOException {
         Path baseDirectory = args.length > 0 ? Path.of(args[0]) : Path.of(".");
@@ -161,30 +191,55 @@ public class YamlMigration {
     private static void migrateSingleFile(Path appYaml) throws IOException {
         Path serviceYaml = appYaml.resolveSibling(OUTPUT_FILE_NAME);
 
-        // Parse YAML into Jackson's tree model. JsonNode works for YAML too.
+        // Parse the source YAML into Jackson's tree model.
         JsonNode inputRoot = YAML_MAPPER.readTree(appYaml.toFile());
 
-        // Build the new YAML tree with ObjectNode instead of text replacement.
-        ObjectNode outputRoot = YAML_MAPPER.createObjectNode();
-        ObjectNode service = outputRoot.putObject("service");
+        // Read required values with JSON Pointer paths, then render the target template.
+        String renderedYaml = renderServiceYaml(templateValues(inputRoot));
 
-        service.put("name", requiredField(inputRoot, "/app/id").asText());
-        service.put("team", requiredField(inputRoot, "/app/owner").asText());
-
-        ObjectNode runtime = service.putObject("runtime");
-        runtime.set("port", requiredField(inputRoot, "/app/port"));
-
-        ObjectNode persistence = service.putObject("persistence");
-        persistence.put("dbHost", requiredField(inputRoot, "/app/database/host").asText());
-        persistence.put("dbName", requiredField(inputRoot, "/app/database/name").asText());
-
-        ObjectNode limits = service.putObject("limits");
-        limits.put("cpu", requiredField(inputRoot, "/app/resources/cpu").asText());
-        limits.put("memory", requiredField(inputRoot, "/app/resources/memory").asText());
+        // Parse the rendered YAML once before writing, so template mistakes fail early.
+        validateYaml(renderedYaml);
 
         // Write service.yaml first. Only delete app.yaml after the write succeeds.
-        YAML_MAPPER.writeValue(serviceYaml.toFile(), outputRoot);
+        Files.writeString(serviceYaml, renderedYaml, StandardCharsets.UTF_8);
         Files.delete(appYaml);
+    }
+
+    private static Map<String, Object> templateValues(JsonNode inputRoot) {
+        return Map.of(
+                "name", requiredField(inputRoot, "/app/id").asText(),
+                "team", requiredField(inputRoot, "/app/owner").asText(),
+                "port", requiredField(inputRoot, "/app/port").asText(),
+                "dbHost", requiredField(inputRoot, "/app/database/host").asText(),
+                "dbName", requiredField(inputRoot, "/app/database/name").asText(),
+                "cpu", requiredField(inputRoot, "/app/resources/cpu").asText(),
+                "memory", requiredField(inputRoot, "/app/resources/memory").asText()
+        );
+    }
+
+    private static String renderServiceYaml(Map<String, Object> values) throws IOException {
+        try (Reader templateReader = templateReader()) {
+            Mustache mustache = MUSTACHE_FACTORY.compile(templateReader, TEMPLATE_FILE_NAME);
+            StringWriter writer = new StringWriter();
+            mustache.execute(writer, values).flush();
+            return writer.toString();
+        }
+    }
+
+    private static Reader templateReader() throws IOException {
+        InputStream templateStream = YamlMigration.class
+                .getClassLoader()
+                .getResourceAsStream(TEMPLATE_FILE_NAME);
+
+        if (templateStream == null) {
+            throw new FileNotFoundException("Missing template resource: " + TEMPLATE_FILE_NAME);
+        }
+
+        return new InputStreamReader(templateStream, StandardCharsets.UTF_8);
+    }
+
+    private static void validateYaml(String yaml) throws IOException {
+        YAML_MAPPER.readTree(yaml);
     }
 
     private static JsonNode requiredField(JsonNode root, String jsonPointer) {
@@ -244,8 +299,10 @@ java-yaml-migration-workshop/
 ├── pom.xml
 ├── src/
 │   └── main/
-│       └── java/
-│           └── YamlMigration.java
+│       ├── java/
+│       │   └── YamlMigration.java
+│       └── resources/
+│           └── service.yaml.mustache
 └── examples/
     └── services/
         └── inventory/
@@ -259,8 +316,10 @@ java-yaml-migration-workshop/
 ├── pom.xml
 ├── src/
 │   └── main/
-│       └── java/
-│           └── YamlMigration.java
+│       ├── java/
+│       │   └── YamlMigration.java
+│       └── resources/
+│           └── service.yaml.mustache
 └── examples/
     └── services/
         └── inventory/
@@ -287,7 +346,7 @@ After the program runs successfully:
 
 The program uses `ObjectMapper` with `YAMLFactory`, so Jackson parses YAML into a `JsonNode` tree. It reads required values with JSON Pointer paths such as `/app/id` and `/app/database/host`.
 
-Then it creates a new `ObjectNode` tree for the target format:
+Then it puts those values into a Mustache template for the target format:
 
 - `/app/id` becomes `/service/name`
 - `/app/owner` becomes `/service/team`
@@ -296,6 +355,8 @@ Then it creates a new `ObjectNode` tree for the target format:
 - `/app/database/name` becomes `/service/persistence/dbName`
 - `/app/resources/cpu` becomes `/service/limits/cpu`
 - `/app/resources/memory` becomes `/service/limits/memory`
+
+Before writing the rendered text to `service.yaml`, the program parses the rendered YAML with Jackson. This validates that the template output is still valid YAML.
 
 The code does not use regex or line scanning. It lets Jackson understand the YAML structure, which is safer and easier to extend.
 

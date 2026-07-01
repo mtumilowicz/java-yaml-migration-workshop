@@ -1,24 +1,30 @@
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
+import com.github.mustachejava.DefaultMustacheFactory;
+import com.github.mustachejava.Mustache;
+import com.github.mustachejava.MustacheFactory;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 public class YamlMigration {
     private static final String INPUT_FILE_NAME = "app.yaml";
     private static final String OUTPUT_FILE_NAME = "service.yaml";
+    private static final String TEMPLATE_FILE_NAME = "service.yaml.mustache";
 
-    private static final YAMLFactory YAML_FACTORY = YAMLFactory.builder()
-            .disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER)
-            .enable(YAMLGenerator.Feature.MINIMIZE_QUOTES)
-            .build();
-    private static final ObjectMapper YAML_MAPPER = new ObjectMapper(YAML_FACTORY);
+    private static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
+    private static final MustacheFactory MUSTACHE_FACTORY = new DefaultMustacheFactory();
 
     public static void main(String[] args) throws IOException {
         Path baseDirectory = args.length > 0 ? Path.of(args[0]) : Path.of(".");
@@ -48,7 +54,6 @@ public class YamlMigration {
     }
 
     private static List<Path> findAppYamlFiles(Path baseDirectory) throws IOException {
-        // Walk through the whole directory tree and keep only files named app.yaml.
         try (Stream<Path> paths = Files.walk(baseDirectory)) {
             return paths
                     .filter(Files::isRegularFile)
@@ -62,25 +67,49 @@ public class YamlMigration {
 
         JsonNode inputRoot = YAML_MAPPER.readTree(appYaml.toFile());
 
-        ObjectNode outputRoot = YAML_MAPPER.createObjectNode();
-        ObjectNode service = outputRoot.putObject("service");
+        String renderedYaml = renderServiceYaml(templateValues(inputRoot));
 
-        service.put("name", requiredField(inputRoot, "/app/id").asText());
-        service.put("team", requiredField(inputRoot, "/app/owner").asText());
+        validateYaml(renderedYaml);
 
-        ObjectNode runtime = service.putObject("runtime");
-        runtime.set("port", requiredField(inputRoot, "/app/port"));
-
-        ObjectNode persistence = service.putObject("persistence");
-        persistence.put("dbHost", requiredField(inputRoot, "/app/database/host").asText());
-        persistence.put("dbName", requiredField(inputRoot, "/app/database/name").asText());
-
-        ObjectNode limits = service.putObject("limits");
-        limits.put("cpu", requiredField(inputRoot, "/app/resources/cpu").asText());
-        limits.put("memory", requiredField(inputRoot, "/app/resources/memory").asText());
-
-        YAML_MAPPER.writeValue(serviceYaml.toFile(), outputRoot);
+        Files.writeString(serviceYaml, renderedYaml, StandardCharsets.UTF_8);
         Files.delete(appYaml);
+    }
+
+    private static Map<String, Object> templateValues(JsonNode inputRoot) {
+        return Map.of(
+                "name", requiredField(inputRoot, "/app/id").asText(),
+                "team", requiredField(inputRoot, "/app/owner").asText(),
+                "port", requiredField(inputRoot, "/app/port").asText(),
+                "dbHost", requiredField(inputRoot, "/app/database/host").asText(),
+                "dbName", requiredField(inputRoot, "/app/database/name").asText(),
+                "cpu", requiredField(inputRoot, "/app/resources/cpu").asText(),
+                "memory", requiredField(inputRoot, "/app/resources/memory").asText()
+        );
+    }
+
+    private static String renderServiceYaml(Map<String, Object> values) throws IOException {
+        try (Reader templateReader = templateReader()) {
+            Mustache mustache = MUSTACHE_FACTORY.compile(templateReader, TEMPLATE_FILE_NAME);
+            StringWriter writer = new StringWriter();
+            mustache.execute(writer, values).flush();
+            return writer.toString();
+        }
+    }
+
+    private static Reader templateReader() throws IOException {
+        InputStream templateStream = YamlMigration.class
+                .getClassLoader()
+                .getResourceAsStream(TEMPLATE_FILE_NAME);
+
+        if (templateStream == null) {
+            throw new FileNotFoundException("Missing template resource: " + TEMPLATE_FILE_NAME);
+        }
+
+        return new InputStreamReader(templateStream, StandardCharsets.UTF_8);
+    }
+
+    private static void validateYaml(String yaml) throws IOException {
+        YAML_MAPPER.readTree(yaml);
     }
 
     private static JsonNode requiredField(JsonNode root, String jsonPointer) {
