@@ -1,0 +1,10 @@
+app:
+  id: inventory-service
+  owner: platform-team
+  port: 8080
+  database:
+    host: db.internal
+    name: inventory
+  resources:
+    cpu: 500m
+    memory: 512Mi

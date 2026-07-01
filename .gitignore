@@ -1,0 +1,21 @@
+# Maven build output
+target/
+
+# IntelliJ IDEA project files
+.idea/
+*.iml
+
+# Java runtime and packaged artifacts
+*.class
+*.jar
+*.war
+*.ear
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Local helper output
+classpath.txt
