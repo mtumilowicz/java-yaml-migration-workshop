@@ -1,9 +1,5 @@
 # java-yaml-migration-workshop
 
-Suggested repository description:
-
-> Java YAML migration workshop: migrating configuration files with Jackson YAML and Mustache templates.
-
   * references
     * https://github.com/FasterXML/jackson-dataformats-text/tree/2.17/yaml
     * https://github.com/FasterXML/jackson-databind
